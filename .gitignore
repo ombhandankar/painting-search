@@ -1,0 +1,9 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+data/
+wikiart_data/
+download.log
+*.egg-info/
+.DS_Store
