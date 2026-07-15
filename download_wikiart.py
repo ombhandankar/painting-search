@@ -17,15 +17,38 @@ os.environ.setdefault("HF_HUB_DOWNLOAD_TIMEOUT", "300")
 import argparse
 import csv
 import sys
+from io import BytesIO
 from pathlib import Path
 
 from datasets import load_dataset
 from huggingface_hub import snapshot_download
+from PIL import Image as PILImage
 from tqdm import tqdm
 
 MANIFEST_FIELDS = ["id", "filename", "artist", "genre", "style"]
 DATASET_REPO = "huggan/wikiart"
 TOTAL_IMAGES = 81444
+
+
+def to_pil_image(image) -> PILImage.Image:
+    """Decode HF/parquet image payloads into a PIL Image.
+
+    Streaming parquet rows often return
+    ``{"bytes": b"...", "path": "..."}`` instead of a ready PIL object.
+    """
+    if isinstance(image, PILImage.Image):
+        return image
+    if isinstance(image, dict):
+        data = image.get("bytes")
+        if data:
+            return PILImage.open(BytesIO(data))
+        path = image.get("path")
+        if path:
+            return PILImage.open(path)
+        raise ValueError(f"Unsupported image dict keys: {list(image.keys())}")
+    if isinstance(image, (bytes, bytearray)):
+        return PILImage.open(BytesIO(image))
+    raise TypeError(f"Unsupported image type: {type(image)}")
 
 
 def load_manifest(path: Path) -> set[int]:
@@ -108,7 +131,7 @@ def extract_images(
 
             filename = f"{global_idx:06d}.jpg"
             try:
-                image = row["image"]
+                image = to_pil_image(row["image"])
                 if image.mode != "RGB":
                     image = image.convert("RGB")
                 image.save(images_dir / filename, "JPEG", quality=92)

@@ -40,31 +40,65 @@ class IndexStore:
 
     def load(self) -> bool:
         self._ensure_dirs()
-        self._connect()
+        conn = self._connect()
         if not INDEX_PATH.exists():
             return False
         self.index = faiss.read_index(str(INDEX_PATH))
+        # SQLite is committed per batch, while FAISS is checkpointed periodically.
+        # After an interruption, discard metadata newer than the last FAISS checkpoint.
+        conn.execute("DELETE FROM paintings WHERE id >= ?", (self.index.ntotal,))
+        conn.commit()
+        metadata_count = conn.execute("SELECT COUNT(*) FROM paintings").fetchone()[0]
+        if metadata_count != self.index.ntotal:
+            raise RuntimeError(
+                f"Index has {self.index.ntotal} vectors but metadata has "
+                f"{metadata_count} rows"
+            )
         return True
 
     def save(self):
         if self.index is None:
             raise RuntimeError("No index to save")
-        faiss.write_index(self.index, str(INDEX_PATH))
+        temporary_path = INDEX_PATH.with_suffix(f"{INDEX_PATH.suffix}.tmp")
+        faiss.write_index(self.index, str(temporary_path))
+        temporary_path.replace(INDEX_PATH)
 
     def add(self, vector: np.ndarray, path: str, title: str | None = None, artist: str | None = None) -> int:
+        return self.add_batch(
+            vector.reshape(1, -1),
+            [(path, title, artist)],
+        )[0]
+
+    def add_batch(
+        self,
+        vectors: np.ndarray,
+        metadata: list[tuple[str, str | None, str | None]],
+    ) -> list[int]:
         if self.index is None:
             self.create_index()
+        if len(vectors) != len(metadata):
+            raise ValueError("Vector and metadata batch sizes differ")
+        if not metadata:
+            return []
 
-        row_id = self.index.ntotal
-        self.index.add(vector.reshape(1, -1))
+        first_id = self.index.ntotal
+        row_ids = list(range(first_id, first_id + len(metadata)))
+        self.index.add(np.ascontiguousarray(vectors, dtype=np.float32))
 
         conn = self._connect()
-        conn.execute(
-            "INSERT INTO paintings (id, path, title, artist) VALUES (?, ?, ?, ?)",
-            (row_id, path, title, artist),
-        )
-        conn.commit()
-        return row_id
+        try:
+            conn.executemany(
+                "INSERT INTO paintings (id, path, title, artist) VALUES (?, ?, ?, ?)",
+                [
+                    (row_id, path, title, artist)
+                    for row_id, (path, title, artist) in zip(row_ids, metadata)
+                ],
+            )
+            conn.commit()
+        except Exception:
+            conn.rollback()
+            raise
+        return row_ids
 
     def search(self, vector: np.ndarray, k: int) -> list[tuple[int, float]]:
         if self.index is None or self.index.ntotal == 0:

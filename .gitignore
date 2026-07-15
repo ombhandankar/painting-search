@@ -5,5 +5,6 @@ venv/
 data/
 wikiart_data/
 download.log
+ingest.log
 *.egg-info/
 .DS_Store

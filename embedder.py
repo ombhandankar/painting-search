@@ -3,11 +3,12 @@ import torch
 from PIL import Image
 from transformers import AutoImageProcessor, AutoModel
 
-from config import INGEST_MAX_SIDE, MODEL_NAME
+from config import INGEST_MAX_SIDE, MODEL_NAME, TORCH_NUM_THREADS
 
 
 class Embedder:
     def __init__(self):
+        torch.set_num_threads(TORCH_NUM_THREADS)
         self.processor = AutoImageProcessor.from_pretrained(MODEL_NAME)
         self.model = AutoModel.from_pretrained(MODEL_NAME)
         self.model.eval()
@@ -24,17 +25,20 @@ class Embedder:
             )
         return image
 
-    def embed(self, image: Image.Image, max_side: int = INGEST_MAX_SIDE) -> np.ndarray:
-        image = self._prepare_image(image, max_side)
-        inputs = self.processor(images=image, return_tensors="pt")
+    def embed_batch(
+        self, images: list[Image.Image], max_side: int = INGEST_MAX_SIDE
+    ) -> np.ndarray:
+        prepared = [self._prepare_image(image, max_side) for image in images]
+        inputs = self.processor(images=prepared, return_tensors="pt")
         inputs = {k: v.to(self.device) for k, v in inputs.items()}
 
-        with torch.no_grad():
+        with torch.inference_mode():
             outputs = self.model(**inputs)
-            # CLS token embedding
-            vector = outputs.last_hidden_state[:, 0, :].squeeze(0).cpu().numpy()
+            vectors = outputs.last_hidden_state[:, 0, :].cpu().numpy()
 
-        norm = np.linalg.norm(vector)
-        if norm > 0:
-            vector = vector / norm
-        return vector.astype(np.float32)
+        norms = np.linalg.norm(vectors, axis=1, keepdims=True)
+        vectors = vectors / np.maximum(norms, np.finfo(np.float32).eps)
+        return vectors.astype(np.float32)
+
+    def embed(self, image: Image.Image, max_side: int = INGEST_MAX_SIDE) -> np.ndarray:
+        return self.embed_batch([image], max_side=max_side)[0]
